@@ -1,0 +1,179 @@
+---
+title: "Data Preprocessing in R: Some unavoidable steps"
+author: "Ziyue Gao"
+date: "2018/1/25"
+output: pdf_document
+---
+
+## load the data from csv file
+Usually we could use two package to load large data sets: `data.table` (with function `fread`) and `readr`(with function `read_csv`). The `fread` function can read the data faster that `read_csv` function. However, the `read_csv` function's result is a tibble, which provide great convenience when we want to manipulate the data. I will use the zillow prize dataset from Kaggle: https://www.kaggle.com/c/zillow-prize-1/data as example.
+
+```{r}
+library(data.table)
+library(readr)
+
+# zillow <- fread('/Users/ziyue/Documents/Academic/datasets/Zillow/properties_2016.csv',header = T)
+zillow <- read_csv('/Users/ziyue/Documents/Academic/datasets/Zillow/properties_2016.csv',col_names = T) 
+logerror = read_csv('/Users/ziyue/Documents/Academic/datasets/Zillow/train_2016_v2.csv',col_names = T)
+
+```
+
+## exploratory data analysis
+
+After loading the data, the first thing we need to do is looking at its size, and what kind of variables this data set have. Sometimes the type of the variable is not suitable for it. For example, in the zillow dataset, some ID which represent the type of equipment in the house are loaded as int (which should be loaded as factors)
+```{r}
+library(tidyverse)
+dim(zillow)
+set.seed(1)
+z_sample <- zillow[sample(1:nrow(zillow),300000,replace = F),]
+table(sapply(z_sample,class))
+id_idx = grep('id',names(z_sample))
+z_sample[,id_idx[-1]] = lapply(z_sample[,id_idx[-1]], factor)
+```
+
+### missing values 
+Next, we need to visualize the missing data and clear off variables with too many missings (the threshold here is 70%)
+```{r}
+z_missing <- sapply(z_sample, function(x) sum(is.na(x)))/nrow(z_sample)
+barplot(sort(z_missing))
+missing_names <- names(which(z_missing > 0.5))
+missing_names
+z_sample <- z_sample[,z_missing < 0.5]
+dim(z_sample)
+```
+
+## variable selection (1)
+Next, we will look into the variables. The steps are:
+
+1. Look at the numerical and categorical variables separately. Methods usually contains: correlation plot, contingency table.
+
+2. Find out relationship between different classes of variables.
+Methods usually contains: boxplot, ggplot colored/faceted by category.
+
+During the whole process, we could pick out the variables that
+are useful.
+
+### numerical variable: correlation matrix
+First we look into the numerical ones. The `melt` function in `reshape2` package is used to melt the correlation matrix and plot the correlation heat matrix. Here we could only find that some variables are highly correlated but do not know there name. 
+
+One thing needs to be noticed is that we when deleting the highly
+correlated variables, we need to choose the one with more missing values to delete. We could use the `findCorrelation` function in `caret` package to pick out the highly linear correlated variables and delete them.
+```{r}
+library(caret)
+varname_byclass <- function(x,class_name){
+  varclass <- sapply(x, class)
+  pick <- varclass %in% class_name
+  return(pick)
+}
+
+z_numeric <- z_sample[,varname_byclass(z_sample,c('numeric','integer'))]
+cor_matrix <- cor(z_numeric,use = 'pairwise.complete.obs')
+cor_list <- melt(cor_matrix)
+
+cor_list %>% 
+  ggplot(aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile()
+
+cor_list %>% 
+  filter(abs(value) > 0.7 & abs(value) < 1) %>% 
+  ggplot(aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile()
+
+high_corr_var <- findCorrelation(cor_matrix,cutoff = 0.7) 
+z_numeric <- z_numeric[,-high_corr_var]
+```
+
+### categorical variables
+
+Then we look into the character/factor variables. And we will pick out the factors which have only a few levels because too many different levels is not helpful when modeling.
+
+```{r}
+library(YaleToolkit)
+z_str <- z_sample[,varname_byclass(z_sample,c('character'))]
+z_str <- z_str[,sapply(z_str, function(x) length(unique(x))) < 20]
+z_str <- lapply(z_str,factor)
+```
+
+```{r}
+z_fac = z_sample[,varname_byclass(z_sample,c('factor'))]
+str(z_fac)
+```
+
+### interaction
+Now we could look at the interelation between numerical and factor variables. Here are two examples.
+```{r}
+z_samplenew = cbind(z_numeric,z_fac,z_str)
+z_samplenew$censustractandblock = NULL
+z_samplenew %>% 
+  ggplot() +
+  geom_density(aes(x = yearbuilt, col = fips))
+```
+
+### zero-variance variable
+
+Some variables will have over 95% same value, so we want to find them out and do not include them in our model.
+
+```{r}
+nzv = nearZeroVar(z_samplenew, saveMetrics = T)
+drop_names <- rownames(nzv[nzv$nzv,])
+z_samplenew[,drop_names] = NULL
+```
+## Feature preprocessing
+
+Feature preprocessing is a very important step before we building
+models. And different kinds of features have different preprocessing methods. Here we will use other small datasets to show the process.
+
+### numerical
+
+Usually we can use the `preprocess` (with method = scale or center and so on) and `predict` function from package `caret`. The function will only choose numerical variables. For tree-based model, we do not need to do the scaling.
+
+```{r}
+library(caret)
+data(iris)
+pre_pro <- preProcess(iris, method = c('center','scale'))
+summary(predict(pre_pro,iris))
+```
+
+### categorical and ordinal features
+
+If we want to use a non-tree (linear model, kNN, neural nets) based model, the way is to use one-hot coding. If two categorical features interacts, then we could combine these two first and do the one-hot coding. We could use the function
+`dummyVars` from the package 'caret'
+
+If it is a ordinal and we want to use tree based model, we could just map the categoies into numbers.
+
+```{r}
+dv <- dummyVars(~Species,iris)
+head(predict(dv,iris))
+```
+
+
+### date and time
+
+Basically there are three ways: Use Package 'lubridate', use function 'as.date', and when there is only year and month, use function as.yearmon from library 'zoo'(the class of the result will be 'yearmon').
+
+The difference between dates are also very important, and we may also want to find some holidays. (use the function `isHoliday` from package `tis` )
+
+```{r}
+library(lubridate)
+dates <- c('20150101','20140205','2006-02-02')
+ymd(dates)
+as.Date(dates, format = '%Y%m%d') # cannot handle the last 
+dates <- ymd(dates)
+as.numeric(dates[1] - dates[2])
+library(tis)
+isHoliday(dates)
+```
+
+## missing value imputation
+
+Random forest could be used to do missing value imputation. Here we use the `missForest` package. However this function cannot handle categorical predictors with more than 53 categories, so we need to pick out the categories first.
+
+```{r}
+library(VIM)
+library(missForest)
+aggr(z_samplenew)
+z_missing <- sapply(z_samplenew, function(x) sum(is.na(x)))/nrow(z_samplenew)
+str(z_samplenew)
+
+# Take a lot of time!
+# z_imputed <- missForest(z_samplenew[,-which(names(z_samplenew) %in% c("parcelid", "regionidcity", "regionidzip"))])
